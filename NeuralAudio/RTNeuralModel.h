@@ -1,5 +1,8 @@
 #pragma once
 
+#include <type_traits>
+#include <Eigen/Core>
+#include <Eigen/Dense>
 #include "NeuralModel.h"
 #include <RTNeural/RTNeural.h>
 #ifdef BUILD_STATIC_RTNEURAL
@@ -14,21 +17,32 @@ namespace NeuralAudio
 		template <typename Matrix>
 		static auto tanh(const Matrix& x)
 		{
-			return x.array().tanh();
+			if constexpr (std::is_fundamental_v<Matrix>)
+				return std::tanh(x);
+			else
+				return x.array().tanh();
 		}
 
 		template <typename Matrix>
 		static auto sigmoid(const Matrix& x)
 		{
-			using T = typename Matrix::Scalar;
+			if constexpr (std::is_fundamental_v<Matrix>)
+				return 1.0f / (1.0f + std::exp(-x));
+			else
+			{
+				using T = typename Matrix::Scalar;
 
-			return ((x.array() / (T)2).array().tanh() + (T)1) / (T)2;
+				return ((x.array() / (T)2).array().tanh() + (T)1) / (T)2;
+			}
 		}
 
 		template <typename Matrix>
 		static auto exp(const Matrix& x)
 		{
-			return x.array().exp();
+			if constexpr (std::is_fundamental_v<Matrix>)
+				return std::exp(x);
+			else
+				return x.array().exp();
 		}
 	};
 
