@@ -5,7 +5,6 @@ namespace NeuralAudio
 {
 #ifdef BUILD_STATIC_RTNEURAL
 		std::list<RTNeuralLSTMDefinitionBase*> rtNeuralLSTMModelDefs;
-		std::list<RTNeuralWaveNetDefinitionBase*> rtNeuralWaveNetModelDefs;
 
 		void EnsureRTNeuralModelDefsAreLoaded()
 		{
@@ -16,11 +15,6 @@ namespace NeuralAudio
 			rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<2, 8>);
 			rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<2, 12>);
 			rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<2, 16>);
-
-			rtNeuralWaveNetModelDefs.push_back(new RTNeuralWaveNetDefinitionT<16, 8>);	// Standard
-			rtNeuralWaveNetModelDefs.push_back(new RTNeuralWaveNetDefinitionT<12, 6>);	// Lite
-			rtNeuralWaveNetModelDefs.push_back(new RTNeuralWaveNetDefinitionT<8, 4>);	// Feather
-			rtNeuralWaveNetModelDefs.push_back(new RTNeuralWaveNetDefinitionT<4, 2>);	// Nano
 		}
 
 		RTNeuralLSTMDefinitionBase* FindRTNeuralLSTMDefinition(size_t numLayers, size_t hiddenSize)
@@ -34,63 +28,34 @@ namespace NeuralAudio
 			return nullptr;
 		}
 
-		RTNeuralWaveNetDefinitionBase* FindRTNeuralWaveNetDefinition(size_t numChannels, size_t headSize)
+		NeuralModelImpl* RTNeuralLoadNAMLSTM(const nlohmann::json& modelJson, NeuralModelLoader *loader)
 		{
-			for (auto const& model : rtNeuralWaveNetModelDefs)
-			{
-				if ((numChannels == model->GetNumChannels()) && (headSize == model->GetHeadSize()))
-					return model;
-			}
-
-			return nullptr;
-		}
-
-		NeuralModel* RTNeuralLoadNAMWaveNet(const nlohmann::json& modelJson)
-		{
-			nlohmann::json config = modelJson.at("config");
-
-			nlohmann::json firstLayerConfig = config.at("layers").at(0);
-			nlohmann::json secondLayerConfig = config.at("layers").at(1);
-			
-			auto modelDef = FindRTNeuralWaveNetDefinition(firstLayerConfig.at("channels"), firstLayerConfig.at("head_size"));
-
-			if (modelDef != nullptr)
-			{
-				auto model = modelDef->CreateModel();
-
-				model->LoadFromNAMJson(modelJson);
-
-				return model;
-			}
-
-			return nullptr;
-		}
-
-		NeuralModel* RTNeuralLoadNAMLSTM(const nlohmann::json& modelJson)
-		{
-			nlohmann::json config = modelJson.at("config");
+			auto& config = modelJson.at("config");
 
 			auto modelDef = FindRTNeuralLSTMDefinition(config.at("num_layers"), config.at("hidden_size"));
 
 			if (modelDef != nullptr)
 			{
 				RTNeuralModel* model = modelDef->CreateModel();
+
+				model->SetModelLoader(loader);
 				model->LoadFromNAMJson(modelJson);
 
-				if (model != nullptr)
-					return model;
-
-				// If we didn't have a static model that matched, use RTNeural's dynamic model
-				RTNeuralModelDyn* dynModel = new RTNeuralModelDyn;
-				dynModel->LoadFromNAMJson(modelJson);
-
-				return dynModel;
+				return model;
 			}
+
+			// If we didn't have a static model that matched, use RTNeural's dynamic model
+			RTNeuralModelDyn* dynModel = new RTNeuralModelDyn;
+
+			dynModel->SetModelLoader(loader);
+			dynModel->LoadFromNAMJson(modelJson);
+
+			return dynModel;
 
 			return nullptr;
 		}
 
-		NeuralModel* RTNeuralLoadKeras(const nlohmann::json& modelJson)
+		NeuralModelImpl* RTNeuralLoadKeras(const nlohmann::json& modelJson, NeuralModelLoader* loader)
 		{
 			const auto layers = modelJson.at("layers");
 			const size_t numLayers = layers.size() - 1;
@@ -103,6 +68,7 @@ namespace NeuralAudio
 			{
 				RTNeuralModel* model = modelDef->CreateModel();
 
+				model->SetModelLoader(loader);
 				model->LoadFromKerasJson(modelJson);
 
 				return model;
