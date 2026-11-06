@@ -1,115 +1,81 @@
+#ifdef BUILD_STATIC_RTNEURAL
+
 #include <list>
 #include "RTNeuralModel.h"
 
 namespace NeuralAudio
 {
-#ifdef BUILD_STATIC_RTNEURAL
-		std::list<RTNeuralLSTMDefinitionBase*> rtNeuralLSTMModelDefs;
-		std::list<RTNeuralWaveNetDefinitionBase*> rtNeuralWaveNetModelDefs;
+	std::list<RTNeuralLSTMDefinitionBase*> rtNeuralLSTMModelDefs;
 
-		void EnsureRTNeuralModelDefsAreLoaded()
+	void EnsureRTNeuralModelDefsAreLoaded()
+	{
+		rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<1, 8>);
+		rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<1, 12>);
+		rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<1, 16>);
+		rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<1, 24>);
+		rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<2, 8>);
+		rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<2, 12>);
+		rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<2, 16>);
+	}
+
+	RTNeuralLSTMDefinitionBase* FindRTNeuralLSTMDefinition(size_t numLayers, size_t hiddenSize)
+	{
+		for (auto const& model : rtNeuralLSTMModelDefs)
 		{
-			rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<1, 8>);
-			rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<1, 12>);
-			rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<1, 16>);
-			rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<1, 24>);
-			rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<2, 8>);
-			rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<2, 12>);
-			rtNeuralLSTMModelDefs.push_back(new RTNeuralLSTMDefinitionT<2, 16>);
-
-			rtNeuralWaveNetModelDefs.push_back(new RTNeuralWaveNetDefinitionT<16, 8>);	// Standard
-			rtNeuralWaveNetModelDefs.push_back(new RTNeuralWaveNetDefinitionT<12, 6>);	// Lite
-			rtNeuralWaveNetModelDefs.push_back(new RTNeuralWaveNetDefinitionT<8, 4>);	// Feather
-			rtNeuralWaveNetModelDefs.push_back(new RTNeuralWaveNetDefinitionT<4, 2>);	// Nano
-		}
-
-		RTNeuralLSTMDefinitionBase* FindRTNeuralLSTMDefinition(size_t numLayers, size_t hiddenSize)
-		{
-			for (auto const& model : rtNeuralLSTMModelDefs)
-			{
-				if ((numLayers == model->GetNumLayers()) && (hiddenSize == model->GetHiddenSize()))
-					return model;
-			}
-
-			return nullptr;
-		}
-
-		RTNeuralWaveNetDefinitionBase* FindRTNeuralWaveNetDefinition(size_t numChannels, size_t headSize)
-		{
-			for (auto const& model : rtNeuralWaveNetModelDefs)
-			{
-				if ((numChannels == model->GetNumChannels()) && (headSize == model->GetHeadSize()))
-					return model;
-			}
-
-			return nullptr;
-		}
-
-		NeuralModel* RTNeuralLoadNAMWaveNet(const nlohmann::json& modelJson)
-		{
-			nlohmann::json config = modelJson.at("config");
-
-			nlohmann::json firstLayerConfig = config.at("layers").at(0);
-			nlohmann::json secondLayerConfig = config.at("layers").at(1);
-			
-			auto modelDef = FindRTNeuralWaveNetDefinition(firstLayerConfig.at("channels"), firstLayerConfig.at("head_size"));
-
-			if (modelDef != nullptr)
-			{
-				auto model = modelDef->CreateModel();
-
-				model->LoadFromNAMJson(modelJson);
-
+			if ((numLayers == model->GetNumLayers()) && (hiddenSize == model->GetHiddenSize()))
 				return model;
-			}
-
-			return nullptr;
 		}
 
-		NeuralModel* RTNeuralLoadNAMLSTM(const nlohmann::json& modelJson)
+		return nullptr;
+	}
+
+	NeuralModelImpl* RTNeuralLoadNAMLSTM(const nlohmann::json& modelJson, NeuralModelLoader *loader)
+	{
+		auto& config = modelJson.at("config");
+
+		auto modelDef = FindRTNeuralLSTMDefinition(config.at("num_layers"), config.at("hidden_size"));
+
+		if (modelDef != nullptr)
 		{
-			nlohmann::json config = modelJson.at("config");
+			RTNeuralModel* model = modelDef->CreateModel();
 
-			auto modelDef = FindRTNeuralLSTMDefinition(config.at("num_layers"), config.at("hidden_size"));
+			model->SetModelLoader(loader);
+			model->LoadFromNAMJson(modelJson);
 
-			if (modelDef != nullptr)
-			{
-				RTNeuralModel* model = modelDef->CreateModel();
-				model->LoadFromNAMJson(modelJson);
-
-				if (model != nullptr)
-					return model;
-
-				// If we didn't have a static model that matched, use RTNeural's dynamic model
-				RTNeuralModelDyn* dynModel = new RTNeuralModelDyn;
-				dynModel->LoadFromNAMJson(modelJson);
-
-				return dynModel;
-			}
-
-			return nullptr;
+			return model;
 		}
 
-		NeuralModel* RTNeuralLoadKeras(const nlohmann::json& modelJson)
+		// If we didn't have a static model that matched, use RTNeural's dynamic model
+		RTNeuralModelDyn* dynModel = new RTNeuralModelDyn;
+
+		dynModel->SetModelLoader(loader);
+		dynModel->LoadFromNAMJson(modelJson);
+
+		return dynModel;
+
+		return nullptr;
+	}
+
+	NeuralModelImpl* RTNeuralLoadKeras(const nlohmann::json& modelJson, NeuralModelLoader* loader)
+	{
+		const auto layers = modelJson.at("layers");
+		const size_t numLayers = layers.size() - 1;
+		const std::string modelType = layers.at(0).at("type");
+		const int hiddenSize = layers.at(0).at("shape").back();
+
+		auto modelDef = FindRTNeuralLSTMDefinition(numLayers, hiddenSize);
+
+		if (modelDef != nullptr)
 		{
-			const auto layers = modelJson.at("layers");
-			const size_t numLayers = layers.size() - 1;
-			const std::string modelType = layers.at(0).at("type");
-			const int hiddenSize = layers.at(0).at("shape").back();
+			RTNeuralModel* model = modelDef->CreateModel();
 
-			auto modelDef = FindRTNeuralLSTMDefinition(numLayers, hiddenSize);
+			model->SetModelLoader(loader);
+			model->LoadFromKerasJson(modelJson);
 
-			if (modelDef != nullptr)
-			{
-				RTNeuralModel* model = modelDef->CreateModel();
-
-				model->LoadFromKerasJson(modelJson);
-
-				return model;
-			}
-
-			return nullptr;
+			return model;
 		}
-#endif
+
+		return nullptr;
+	}
 }
-
+#endif

@@ -3,6 +3,9 @@
 #include <cmath>
 #include <Eigen/Core>
 #include <math_approx/math_approx.hpp>
+#include <NeuralAudio/ChannelBuffer.h>
+
+#define TCONST(num) static_cast<T>(num)
 
 namespace NeuralAudio
 {
@@ -14,78 +17,116 @@ namespace NeuralAudio
 #define WAVENET_MATH FastMath
 #endif
 
+	template<typename T>
 	struct StdMath
 	{
-		template <typename Matrix>
-		static auto Tanh(Matrix& x)
+		template<size_t Channels>
+		static void Tanh(ChannelRowSpan<T, Channels>& channelBuffer)
 		{
-			float* data = x.data();
-			size_t size = x.rows() * x.cols();
+			T* data = channelBuffer.GetData();
+			size_t size = channelBuffer.GetSize();
 
 			for (size_t pos = 0; pos < size; pos++)
 			{
 				data[pos] = Tanh(data[pos]);
 			}
-
-			return x;
 		}
 
-		static inline float Tanh(const float x)
+		static inline T Tanh(const T x)
 		{
 			return std::tanh(x);
 		}
 
-		static inline float Sigmoid(float x)
+		static inline T Sigmoid(T x)
 		{
-			return 1.0f / (1.0f + std::exp(-x));
+			return TCONST(1.0) / (TCONST(1.0)+ std::exp(-x));
+		}
+
+		template<size_t Channels>
+		static void LeakyReLU(ChannelRowSpan<T, Channels> channelBuffer)
+		{
+			T* data = channelBuffer.GetData();
+			size_t size = channelBuffer.GetSize();
+
+			for (size_t pos = 0; pos < size; pos++)
+			{
+				data[pos] = LeakyReLU(data[pos]);
+			}
+		}
+
+		static inline T LeakyReLU(T x, T negativeSlope)
+		{
+			return x > TCONST(0) ? x : negativeSlope * x;
+		}
+
+		static inline T LeakyReLU(T x)
+		{
+			return LeakyReLU(x, TCONST(0.01));
 		}
 	};
 
+	template<typename T>
 	struct FastMath
 	{
-		template <typename Matrix>
-		static auto Tanh(Matrix& x)
+		template<size_t Channels>
+		static void Tanh(ChannelRowSpan<T, Channels>& channelBuffer)
 		{
-			float* data = x.data();
-			size_t size = x.rows() * x.cols();
+			T* data = channelBuffer.GetData();
+			size_t size = channelBuffer.GetSize();
 
 			for (size_t pos = 0; pos < size; pos++)
 			{
 				data[pos] = Tanh(data[pos]);
 			}
-
-			return x;
 		}
 
-		static inline float Tanh(const float x)
+		static inline T Tanh(const T x)
 		{
-			//return std::tanh(x);
+			const T ax = std::abs(x);
 
-			//return math_approx::tanh<5>(x);
+			const T x2 = x * x;
 
-			const float ax = fabsf(x);
-
-			const float x2 = x * x;
-
-			return (x * (2.45550750702956f + 2.45550750702956f * ax + (0.893229853513558f + 0.821226666969744f * ax) * x2)
-				/ (2.44506634652299f + (2.44506634652299f + x2) * fabsf(x + 0.814642734961073f * x * ax)));
+			return (x * (TCONST(2.45550750702956) + TCONST(2.45550750702956) * ax + (TCONST(0.893229853513558) + TCONST(0.821226666969744) * ax) * x2)
+				/ (TCONST(2.44506634652299) + (TCONST(2.44506634652299) + x2) * std::abs(x + TCONST(0.814642734961073) * x * ax)));
 		}
 
-		static inline float Sigmoid(float x)
+		static inline T Sigmoid(T x)
 		{
-			//return math_approx::sigmoid_exp<5>(x);
+			return  TCONST(0.5) * (Tanh(x * TCONST(0.5)) + TCONST(1));
+		}
 
-			//return 1.0f / (1.0f + std::exp(-x));
-			return  0.5f * (Tanh(x * 0.5f) + 1);
+		template<size_t Channels>
+		static void LeakyReLU(ChannelRowSpan<T, Channels> channelBuffer)
+		{
+			T* data = channelBuffer.GetData();
+			size_t size = channelBuffer.GetSize();
+
+			for (size_t pos = 0; pos < size; pos++)
+			{
+				data[pos] = LeakyReLU(data[pos]);
+			}
+		}
+
+		static inline T LeakyReLU(T x, T negativeSlope)
+		{
+			return x > TCONST(0.0) ? x : negativeSlope * x;
+		}
+
+		static inline T LeakyReLU(T x)
+		{
+			return LeakyReLU(x, TCONST(0.01));
 		}
 	};
 
+	template<typename T>
 	struct EigenMath
 	{
-		template <typename Matrix>
-		static auto Tanh(const Matrix& x)
+		template<size_t Channels>
+		static void Tanh(ChannelRowSpan<T, Channels>& channelBuffer)
 		{
-			return x.array().tanh();
+			auto map = channelBuffer.GetEigenMap();
+
+			map = map.array().tanh();
 		}
 
 		static inline float Tanh(const float x)
@@ -93,9 +134,17 @@ namespace NeuralAudio
 			return Eigen::numext::tanh(x);
 		}
 
-		static inline float Sigmoid(float x)
+		template<size_t Channels>
+		static void LeakyReLU(ChannelRowSpan<T, Channels> channelBuffer)
 		{
-			return  0.5f * (Tanh(x * 0.5f) + 1);
+			auto map = channelBuffer.GetEigenMap();
+
+			map = (map.array() < TCONST(0.0)).select(map.array() * TCONST(0.01), map.array());
+		}
+
+		static inline T Sigmoid(T x)
+		{
+			return  TCONST(0.5) * (Tanh(x * TCONST(0.5)) + TCONST(1));
 		}
 	};
 }

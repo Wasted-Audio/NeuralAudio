@@ -1,14 +1,16 @@
 #pragma once
 
 #include "NeuralModel.h"
+#include "NeuralModelImpl.h"
 #include <NAM/activations.h>
+#include <NAM/get_dsp.h>
 #include <NAM/dsp.h>
-#include <NAM/lstm.h>
-#include <NAM/wavenet.h>
+#include <NAM/registry.h>
+#include <NAM/slimmable.h>
 
 namespace NeuralAudio
 {
-	class NAMModel : public NeuralModel
+	class NAMModel : public NeuralModelImpl
 	{
 	public:
 		NAMModel()
@@ -22,66 +24,94 @@ namespace NeuralAudio
 				namModel.reset();
 		}
 
-		EModelLoadMode GetLoadMode()
+		EModelLoadMode GetLoadMode() override
 		{
 			return EModelLoadMode::NAMCore;
 		}
 
+		int GetReceptiveFieldSize() override
+		{
+			return namModel->GetPrewarmSamples();
+		}
+
 		bool LoadFromJson(const nlohmann::json& modelJson)
 		{
-			if (namModel)
-				namModel.reset();
+			slimmableSize = loader->GetDefaultQualityScaleFactor();
 
 			ReadNAMConfig(modelJson);
 
-			std::string arch = modelJson.at("architecture");
+			nam::ScopedPrewarmOnResetDefault scoped_prewarm_default(false);
 
-			nlohmann::json config = modelJson.at("config");
+			namModel = nam::get_dsp(modelJson);
 
-			std::vector<float> weights = modelJson.at("weights");
+			auto* slim = dynamic_cast<nam::SlimmableModel*>(namModel.get());
 
-			if (arch == "WaveNet")
+			if (slim != nullptr)
 			{
-				std::vector<nam::wavenet::LayerArrayParams> layer_array_params;
+				isSlimmable = true;
 
-				for (size_t i = 0; i < config.at("layers").size(); i++)
-				{
-					nlohmann::json layerConfig = config.at("layers").at(i);
-
-					layer_array_params.push_back(
-						nam::wavenet::LayerArrayParams(layerConfig.at("input_size"), layerConfig.at("condition_size"), layerConfig.at("head_size"),
-							layerConfig.at("channels"), layerConfig.at("kernel_size"), layerConfig.at("dilations"),
-							layerConfig.at("activation"), layerConfig.at("gated"), layerConfig.at("head_bias")));
-				}
-
-				const bool with_head = !config.at("head").is_null();
-				const float head_scale = config.at("head_scale");
-
-				namModel = std::make_unique<nam::wavenet::WaveNet>(layer_array_params, head_scale, with_head, weights, sampleRate);
+				slim->SetSlimmableSize(slimmableSize);
 			}
-			else if (arch == "LSTM")
-			{
-				const int num_layers = config.at("num_layers");
-				const int input_size = config.at("input_size");
-				const int hidden_size = config.at("hidden_size");
 
-				namModel = std::make_unique<nam::lstm::LSTM>(num_layers, input_size, hidden_size, weights, sampleRate);
-			}
+			SetMaxAudioBufferSize(loader->GetDefaultMaxAudioBufferSize());
+
+			namModel->SetPrewarmOnReset(true);
 
 			return true;
 		}
 
-		void Process(float* input, float* output, size_t numSamples)
+		bool HasQualityScaling() override
 		{
-			namModel->process(input, output, (int)numSamples);
+			return isSlimmable;
 		}
 
-		void Prewarm()
+		float GetQualityScaleFactor() override
+		{
+			return slimmableSize;
+		}
+
+		void SetQualityScaleFactor(float scaleFactor) override
+		{
+			if (HasQualityScaling())
+			{
+				if (slimmableSize != scaleFactor)
+				{
+					slimmableSize = scaleFactor;
+
+					if (namModel != nullptr)
+					{
+						auto* slim = dynamic_cast<nam::SlimmableModel*>(namModel.get());
+
+						slim->SetSlimmableSize(slimmableSize);
+					}
+				}
+			}
+		}
+
+		void SetMaxAudioBufferSize(const int maxSize) override
+		{
+			if (maxSize != currentMaxSize)	// Don't reset if we don't need to
+			{
+				namModel->Reset(namModel->GetExpectedSampleRate(), maxSize);
+
+				currentMaxSize = maxSize;
+			}
+		}
+
+		void Process(const float* input, float* output, size_t numSamples) override
+		{
+			namModel->process(const_cast<float**>(&input), &output, (int)numSamples);
+		}
+
+		void Prewarm() override
 		{
 			namModel->prewarm();
 		}
 
 	private:
 		std::unique_ptr<nam::DSP> namModel = nullptr;
+		int currentMaxSize = -1;
+		float slimmableSize = 1.0f;
+		bool isSlimmable = false;
 	};
 }
