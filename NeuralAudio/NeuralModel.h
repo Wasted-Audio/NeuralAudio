@@ -2,7 +2,18 @@
 
 #include <filesystem>
 #include <istream>
+#include <algorithm>
+#include <string>
+#include <vector>
 #include "json.hpp"
+
+#ifndef DEFAULT_QUALITY_SCALE
+#define DEFAULT_QUALITY_SCALE 1.0
+#endif
+
+#ifndef DEFAULT_INPUT_DBU
+#define DEFAULT_INPUT_DBU 12
+#endif
 
 namespace NeuralAudio
 {
@@ -13,47 +24,17 @@ namespace NeuralAudio
 		NAMCore
 	};
 
+	enum ECompositeModelLoadMode
+	{
+		LoadAll,
+		OnDemand
+	};
+
 	class NeuralModel
 	{
 	public:
-		static NeuralModel* CreateFromFile(std::filesystem::path modelPath);
-		static NeuralModel* CreateFromStream(std::basic_istream<char>& stream, std::filesystem::path extension);
-
 		virtual ~NeuralModel()
 		{
-		}
-
-		static bool SetLSTMLoadMode(EModelLoadMode val)
-		{
-			if (!SupportsLSTMLoadMode(val))
-				return false;
-
-			lstmLoadMode = val;
-
-			return true;
-		}
-
-		static bool SetWaveNetLoadMode(EModelLoadMode val)
-		{
-			if (!SupportsWaveNetLoadMode(val))
-				return false;
-
-			wavenetLoadMode = val;
-
-			return true;
-		}
-
-		static bool SupportsWaveNetLoadMode(EModelLoadMode mode);
-		static bool SupportsLSTMLoadMode(EModelLoadMode mode);
-
-		static void SetAudioInputLevelDBu(float audioDBu)
-		{
-			audioInputLevelDBu = audioDBu;
-		}
-
-		static void SetDefaultMaxAudioBufferSize(int maxSize)
-		{
-			defaultMaxAudioBufferSize = maxSize;
 		}
 
 		virtual EModelLoadMode GetLoadMode()
@@ -61,14 +42,46 @@ namespace NeuralAudio
 			return EModelLoadMode::Internal;
 		}
 
+		virtual bool HasQualityScaling()
+		{
+			return false;
+		}
+
+		virtual float GetQualityScaleFactor()
+		{
+			return 1.0f;
+		}
+
+		virtual bool IsQualityChangeRealtimeSafe(float newScaleFactor)
+		{
+			(void)newScaleFactor;
+
+			return true;
+		}
+
+		virtual void SetQualityScaleFactor(float scaleFactor)
+		{
+			(void)scaleFactor;
+		}
+
 		virtual bool IsStatic()
 		{
 			return false;
 		}
 
-		virtual void SetMaxAudioBufferSize(int maxSize)
+		virtual void SetMaxAudioBufferSize(const int maxSize)
 		{
 			(void)maxSize;
+		}
+
+		virtual void SetAudioInputLevelDBu(float audioDBu)
+		{
+			audioInputLevelDBu = audioDBu;
+		}
+
+		virtual float GetAudioInputLevelDBu()
+		{
+			return audioInputLevelDBu;
 		}
 
 		virtual float GetRecommendedInputDBAdjustment()
@@ -91,7 +104,27 @@ namespace NeuralAudio
 			return -1;	// No fixed receptive field size (ie: for LSTM)
 		}
 
-		virtual void Process(float* input, float* output, size_t numSamples)
+		virtual std::string GetModelVersion()
+		{
+			return modelVersion;
+		}
+
+		virtual std::string GetMetadata(const std::string& fieldName)
+		{
+			auto it = std::find_if(metadata.begin(), metadata.end(), [&](const auto& pair)
+			{
+				return pair.first == fieldName;
+			});
+
+			if (it != metadata.end())
+			{
+				return it->second;
+			}
+
+			return "";
+		}
+
+		virtual void Process(const float* input, float* output, size_t numSamples)
 		{
 			(void)input;
 			(void)output;
@@ -103,32 +136,98 @@ namespace NeuralAudio
 		}
 
 	protected:
-		void ReadNAMConfig(const nlohmann::json& modelJson);
-		void ReadKerasConfig(const nlohmann::json& modelJson);
-
+		float audioInputLevelDBu = (float)DEFAULT_INPUT_DBU;
 		float modelInputLevelDBu = 12;
 		float modelOutputLevelDBu = 12;
 		float modelLoudnessDB = -18;
 		float sampleRate = 48000;
-
-		inline static float audioInputLevelDBu = 12;
-		inline static EModelLoadMode lstmLoadMode = EModelLoadMode::Internal;
-		inline static EModelLoadMode wavenetLoadMode = EModelLoadMode::Internal;
-		inline static int defaultMaxAudioBufferSize = 128;
-
-		void Prewarm(size_t numSamples, size_t blockSize)
-		{
-			std::vector<float> input;
-			input.resize(blockSize);
-			std::fill(input.begin(), input.end(), 0.0f);
-
-			std::vector<float> output;
-			output.resize(blockSize);
-
-			for (size_t block = 0; block < (numSamples / blockSize); block++)
-			{
-				Process(input.data(), output.data(), blockSize);
-			}
-		}
+		std::string modelVersion = "";
+		std::vector<std::pair<std::string, std::string>> metadata;
 	};
+
+	class NeuralModelLoader
+	{
+		public:
+			NeuralModel* CreateFromFile(const std::filesystem::path& modelPath, bool doPrewarm = true);
+			NeuralModel* CreateFromStream(std::basic_istream<char>& stream, const std::filesystem::path& extension, bool doPrewarm = true);
+			NeuralModel* CreateFromJson(nlohmann::json& modelJson, const std::filesystem::path& extension, bool doPrewarm = true);
+
+			bool SetLSTMLoadMode(EModelLoadMode val)
+			{
+				if (!SupportsLSTMLoadMode(val))
+					return false;
+
+				lstmLoadMode = val;
+
+				return true;
+			}
+
+			bool SetWaveNetLoadMode(EModelLoadMode val)
+			{
+				if (!SupportsWaveNetLoadMode(val))
+					return false;
+
+				wavenetLoadMode = val;
+
+				return true;
+			}
+
+			ECompositeModelLoadMode GetCompositeModelLoadMode()
+			{
+				return compositeLoadMode;
+			}
+
+			void SetCompositeModelLoadMode(ECompositeModelLoadMode loadMode)
+			{
+				compositeLoadMode = loadMode;
+			}
+
+			bool SupportsWaveNetLoadMode(EModelLoadMode mode);
+			bool SupportsLSTMLoadMode(EModelLoadMode mode);
+
+			void SetAudioInputLevelDBu(float audioDBu)
+			{
+				audioInputLevelDBu = audioDBu;
+			}
+
+			float GetAudioInputLevelDBu()
+			{
+				return audioInputLevelDBu;
+			}
+
+			void SetDefaultMaxAudioBufferSize(int maxSize)
+			{
+				defaultMaxAudioBufferSize = maxSize;
+			}
+
+			int GetDefaultMaxAudioBufferSize()
+			{
+				return defaultMaxAudioBufferSize;
+			}
+
+			void SetDefaultQualityScaleFactor(float scaleFactor)
+			{
+				defaultQualityScaleFactor = scaleFactor;
+			}
+
+			float GetDefaultQualityScaleFactor()
+			{
+				return defaultQualityScaleFactor;
+			}
+
+			void SetExternalSampleRate(int sampleRate)
+			{
+				this->externalSampleRate = sampleRate;
+			}
+
+		protected:
+			EModelLoadMode lstmLoadMode = EModelLoadMode::Internal;
+			EModelLoadMode wavenetLoadMode = EModelLoadMode::Internal;
+			ECompositeModelLoadMode compositeLoadMode = ECompositeModelLoadMode::LoadAll;
+			float audioInputLevelDBu = (float)DEFAULT_INPUT_DBU;
+			int defaultMaxAudioBufferSize = 128;
+			float defaultQualityScaleFactor = (float)DEFAULT_QUALITY_SCALE;
+			int externalSampleRate = 48000;
+	};
+
 }
