@@ -27,13 +27,13 @@ enum EActivationType
 
 namespace NeuralAudio
 {
-	template <int Channels, int ReceptiveFieldSize>
+	template <typename T, int Channels, int ReceptiveFieldSize>
 	class ChannelHistoryBuffer
 	{
 	public:
-		static constexpr auto BufferSize = ReceptiveFieldSize + ((LAYER_ARRAY_BUFFER_PADDING + 1) * WAVENET_MAX_NUM_FRAMES);
+		static constexpr auto BufferSize = (ReceptiveFieldSize == 0) ? WAVENET_MAX_NUM_FRAMES : ReceptiveFieldSize + ((LAYER_ARRAY_BUFFER_PADDING + 1) * WAVENET_MAX_NUM_FRAMES);
 
-		ChannelBuffer<float, Channels, BufferSize> buffer;
+		ChannelBuffer<T, Channels, BufferSize> buffer;
 		size_t bufferStart;
 
 		void AllocBuffer(int allocNum)
@@ -52,16 +52,22 @@ namespace NeuralAudio
 #if (LAYER_ARRAY_BUFFER_PADDING == 0)
 			bufferStart = ReceptiveFieldSize;
 #else
-			bufferStart = BufferSize - (WAVENET_MAX_NUM_FRAMES * ((allocNum % LAYER_ARRAY_BUFFER_PADDING) + 1));	// Do the modulo to handle cases where LAYER_ARRAY_BUFFER_PADDING is not big enough to handle offset
+			if constexpr (ReceptiveFieldSize == 0)
+				bufferStart = 0;
+			else
+				bufferStart = BufferSize - (WAVENET_MAX_NUM_FRAMES * ((allocNum % LAYER_ARRAY_BUFFER_PADDING) + 1));	// Do the modulo to handle cases where LAYER_ARRAY_BUFFER_PADDING is not big enough to handle offset
 #endif
 		}
 
 		void AdvanceFrames(const size_t numFrames)
 		{
-			bufferStart += numFrames;
+			if constexpr (ReceptiveFieldSize > 0)
+			{
+				bufferStart += numFrames;
 
-			if ((bufferStart + WAVENET_MAX_NUM_FRAMES) > (size_t)buffer.GetNumCols())
-				RewindBuffer();
+				if ((bufferStart + WAVENET_MAX_NUM_FRAMES) > (size_t)buffer.GetNumCols())
+					RewindBuffer();
+			}
 		}
 
 		void RewindBuffer()
@@ -84,12 +90,12 @@ namespace NeuralAudio
 
 	struct Empty {};
 
-	template <int InChannels, int OutChannels, int KernelSize, bool DoBias, int Dilation>
+	template <typename T, int InChannels, int OutChannels, int KernelSize, bool DoBias, int Dilation>
 	class Conv1DT
 	{
 	public:
 		static constexpr auto ReceptiveFieldSize = (KernelSize - 1) * Dilation;
-		ChannelHistoryBuffer<InChannels, ReceptiveFieldSize> channelBuffer;
+		ChannelHistoryBuffer<T, InChannels, ReceptiveFieldSize> channelBuffer;
 
 		size_t GetNumWeights()
 		{
@@ -110,6 +116,21 @@ namespace NeuralAudio
 			}
 		}
 
+		std::array<ChannelBuffer<T, OutChannels, InChannels>, KernelSize>& GetWeights()
+		{
+			return weights;
+		}
+
+		// Avoid allocation for unused bias
+		using BiasType = typename std::conditional<DoBias,
+			Eigen::Vector<T, OutChannels>,
+			Empty>::type;
+
+		BiasType& GetBias()
+		{
+			return bias;
+		}
+
 		Conv1DT()
 		{
 			for (int k = 0; k < KernelSize; k++)
@@ -121,77 +142,100 @@ namespace NeuralAudio
 			return channelBuffer.buffer.Slice(channelBuffer.bufferStart, numFrames);
 		}
 
-		inline void Process(const ChannelRowSpan<float, OutChannels>& output)
+		inline void Process(const ChannelRowSpan<T, OutChannels>& output)
 		{
 			const size_t numFrames = output.GetNumCols();
-			float* __restrict outputPtr = output.GetData();
+			T* __restrict outputPtr = output.GetData();
 
 #if MULTIFRAME_8X8_CONVOLUTION != 0
-			if constexpr ((InChannels == 8) && (OutChannels == 8) && DoBias)
+			if constexpr ((((InChannels == 8) && (OutChannels == 8)) || ((InChannels == 16) && (OutChannels == 16)) || ((InChannels == 4) && (OutChannels == 4)) || ((InChannels == 2) && (OutChannels == 2))) && DoBias)
 			{
 				// Based on @jfsantos NAM Core implementation - https://github.com/sdatkinson/NeuralAmpModelerCore/pull/277
 
-				constexpr size_t tileSize = MULTIFRAME_8X8_CONVOLUTION;
+				constexpr size_t tileSize = (InChannels == 16) ? (MULTIFRAME_8X8_CONVOLUTION / 2) : MULTIFRAME_8X8_CONVOLUTION;
 				const size_t nFTile = (numFrames / tileSize) * tileSize;
 
 				for (size_t f = 0; f < nFTile; f += tileSize)
 				{
-					alignas(32) float a[tileSize][InChannels]{};
+					alignas(CHANNEL_BUFFER_ALIGN) T a[tileSize][InChannels]{};
 
 					for (size_t k = 0; k < KernelSize; k++)
 					{
-						const float* __restrict W = weightPtrs[k];
+						const T* __restrict W = weightPtrs[k];
 						const auto offset = Dilation * (k + 1 - KernelSize);
-						const float* __restrict hb = channelBuffer.buffer.GetDataConst(channelBuffer.bufferStart + offset + f);
+						const T* __restrict hb = channelBuffer.buffer.GetDataConst(channelBuffer.bufferStart + offset + f);
 
 						for (size_t cp = 0; cp < InChannels; cp++)
 						{
-							const float* __restrict Wcol = W + cp * InChannels;
-							const float h0 = hb[cp], h1 = hb[InChannels + cp], h2 = hb[2 * InChannels + cp], h3 = hb[3 * InChannels + cp];
+							const T* __restrict Wcol = W + cp * InChannels;
 
-#if MULTIFRAME_8X8_CONVOLUTION == 8
-							const float h4 = hb[4 * InChannels + cp], h5 = hb[5 * InChannels + cp], h6 = hb[6 * InChannels + cp], h7 = hb[7 * InChannels + cp];
-#endif
-
-							for (size_t o = 0; o < InChannels; o++)
+							if constexpr (tileSize == 2)
 							{
-								const float wo = Wcol[o];
-								a[0][o] += wo * h0;
-								a[1][o] += wo * h1;
-								a[2][o] += wo * h2;
-								a[3][o] += wo * h3;
-#if MULTIFRAME_8X8_CONVOLUTION == 8
-								a[4][o] += wo * h4;
-								a[5][o] += wo * h5;
-								a[6][o] += wo * h6;
-								a[7][o] += wo * h7;
-#endif
+								const T h0 = hb[cp], h1 = hb[InChannels + cp];
+
+								for (size_t o = 0; o < InChannels; o++)
+								{
+									const T wo = Wcol[o];
+									a[0][o] += wo * h0;
+									a[1][o] += wo * h1;
+								}
+							}
+							else if constexpr (tileSize == 4)
+							{
+								const T h0 = hb[cp], h1 = hb[InChannels + cp], h2 = hb[2 * InChannels + cp], h3 = hb[3 * InChannels + cp];
+
+								for (size_t o = 0; o < InChannels; o++)
+								{
+									const T wo = Wcol[o];
+									a[0][o] += wo * h0;
+									a[1][o] += wo * h1;
+									a[2][o] += wo * h2;
+									a[3][o] += wo * h3;
+								}
+							}
+							else // tileSize == 8
+							{
+								const T h0 = hb[cp], h1 = hb[InChannels + cp], h2 = hb[2 * InChannels + cp], h3 = hb[3 * InChannels + cp];
+								const T h4 = hb[4 * InChannels + cp], h5 = hb[5 * InChannels + cp], h6 = hb[6 * InChannels + cp], h7 = hb[7 * InChannels + cp];
+
+								for (size_t o = 0; o < InChannels; o++)
+								{
+									const T wo = Wcol[o];
+									a[0][o] += wo * h0;
+									a[1][o] += wo * h1;
+									a[2][o] += wo * h2;
+									a[3][o] += wo * h3;
+									a[4][o] += wo * h4;
+									a[5][o] += wo * h5;
+									a[6][o] += wo * h6;
+									a[7][o] += wo * h7;
+								}
 							}
 						}
 					}
 
 					for (size_t ti = 0; ti < tileSize; ti++)
-						std::memcpy(outputPtr + static_cast<size_t>(f + ti) * InChannels, a[ti], InChannels * sizeof(float));
+						std::memcpy(outputPtr + static_cast<size_t>(f + ti) * InChannels, a[ti], InChannels * sizeof(T));
 				}
 
 				// Scalar tail for any frames past the tile-aligned boundary.
 				for (size_t f = nFTile; f < numFrames; f++)
 				{
-					float* zf = outputPtr + static_cast<size_t>(f) * InChannels;
+					T* zf = outputPtr + static_cast<size_t>(f) * InChannels;
 
 					for (size_t o = 0; o < InChannels; o++)
-						zf[o] = 0.0f;
+						zf[o] = TCONST(0.0);
 
 					for (size_t k = 0; k < KernelSize; k++)
 					{
-						const float* W = weightPtrs[k];
+						const T* W = weightPtrs[k];
 						const auto offset = Dilation * (k + 1 - KernelSize);
-						const float* h = channelBuffer.buffer.GetDataConst(channelBuffer.bufferStart + offset + f);
+						const T* h = channelBuffer.buffer.GetDataConst(channelBuffer.bufferStart + offset + f);
 
 						for (int cp = 0; cp < InChannels; cp++)
 						{
-							const float hv = h[cp];
-							const float* Wcol = W + cp * InChannels;
+							const T hv = h[cp];
+							const T* Wcol = W + cp * InChannels;
 
 							for (size_t o = 0; o < InChannels; o++)
 								zf[o] += Wcol[o] * hv;
@@ -202,7 +246,7 @@ namespace NeuralAudio
 			else
 #endif
 			{
-				const float* biasPtr = nullptr;
+				const T* biasPtr = nullptr;
 				
 				if constexpr (DoBias)
 				{
@@ -211,28 +255,28 @@ namespace NeuralAudio
 
 				for (size_t k = 0; k < KernelSize; k++)
 				{
-					const float* weightPtr = this->weights[k].GetDataConst();
+					const T* weightPtr = this->weights[k].GetDataConst();
 
 					const auto offset = Dilation * ((int)k + 1 - KernelSize);
 
-					if constexpr (DoBias && MatMul<InChannels, OutChannels>::HasKernel())
+					if constexpr (DoBias && MatMul<T, InChannels, OutChannels>::HasKernel())
 					{
-						const float* inputPtr = channelBuffer.buffer.GetDataConst(channelBuffer.bufferStart + offset);
+						const T* inputPtr = channelBuffer.buffer.GetDataConst(channelBuffer.bufferStart + offset);
 
 						if (k == 0)	// Maybe move this out of loop?
 						{
 							if constexpr (DoBias)
 							{
-								MatMul<InChannels, OutChannels>::MultiplyInitColwise(inputPtr, outputPtr, weightPtr, biasPtr, numFrames);
+								MatMul<T, InChannels, OutChannels>::MultiplyInitColwise(inputPtr, outputPtr, weightPtr, biasPtr, numFrames);
 							}
 							else
 							{
-								MatMul<InChannels, OutChannels>::MultiplyInitZero(inputPtr, outputPtr, weightPtr, numFrames);
+								MatMul<T, InChannels, OutChannels>::MultiplyInitZero(inputPtr, outputPtr, weightPtr, numFrames);
 							}
 						}
 						else
 						{
-							MatMul<InChannels, OutChannels>::MultiplyAccumlulate(inputPtr, outputPtr, weightPtr, numFrames);
+							MatMul<T, InChannels, OutChannels>::MultiplyAccumlulate(inputPtr, outputPtr, weightPtr, numFrames);
 						}
 					}
 					else
@@ -247,57 +291,67 @@ namespace NeuralAudio
 				}
 			}
 
-			if constexpr (DoBias && !MatMul<InChannels, OutChannels>::HasKernel())
+			if constexpr (DoBias && !MatMul<T, InChannels, OutChannels>::HasKernel())
 				output.GetEigenMap().colwise() += bias;
 		}
 
 	private:
-		alignas(32) std::array<ChannelBuffer<float, OutChannels, InChannels>, KernelSize> weights;	// consider making this a contiguous block of data instead of block of ChannelBuffers
-		std::array<float *, KernelSize> weightPtrs;
-
-		// Avoid allocation for unused bias
-		using BiasType = typename std::conditional<DoBias,
-			Eigen::Vector<float, OutChannels>,
-			Empty>::type;
+		alignas(CHANNEL_BUFFER_ALIGN) std::array<ChannelBuffer<T, OutChannels, InChannels>, KernelSize> weights;	// consider making this a contiguous block of data instead of block of ChannelBuffers
+		std::array<T *, KernelSize> weightPtrs;
 
 		BiasType bias;
 	};
 
-	template <int InSize, int OutSize, bool DoBias>
+	template <typename T, int InChannels, int OutChannels, bool DoBias>
 	class DenseLayerT
 	{
 	public:
 		size_t GetNumWeights()
 		{
-			return OutSize * InSize + (DoBias ? OutSize : 0);
+			return OutChannels * InChannels + (DoBias ? OutChannels : 0);
 		}
 
 		void SetWeights(std::vector<float>::iterator& inWeights)
 		{
-			for (size_t i = 0; i < OutSize; i++)
-				for (size_t j = 0; j < InSize; j++)
+			for (size_t i = 0; i < OutChannels; i++)
+				for (size_t j = 0; j < InChannels; j++)
 					weights(i, j) = *(inWeights++);
 
 			if constexpr (DoBias)
 			{
-				for (size_t i = 0; i < OutSize; i++)
+				for (size_t i = 0; i < OutChannels; i++)
 					bias(i) = *(inWeights++);
 			}
 		}
 
-		void Process(const ChannelRowSpan<float, InSize>& input, const ChannelRowSpan<float, OutSize>& output) const
+		ChannelBuffer<T, OutChannels, InChannels>& GetWeights()
+		{
+			return weights;
+		}
+
+		// Avoid allocation for unused bias
+		using BiasType = typename std::conditional<DoBias,
+			Eigen::Vector<T, OutChannels>,
+			Empty>::type;
+
+		BiasType& GetBias()
+		{
+			return bias;
+		}
+
+		void Process(const ChannelRowSpan<T, InChannels>& input, const ChannelRowSpan<T, OutChannels>& output) const
 		{
 			size_t numFrames = output.GetNumCols();
 
-			if constexpr (MatMul<InSize, OutSize>::HasKernel())
+			if constexpr (MatMul<T, InChannels, OutChannels>::HasKernel())
 			{
 				if constexpr (DoBias)
 				{
-					MatMul<InSize, OutSize>::MultiplyInitColwise(input.GetDataConst(), output.GetData(), weights.GetDataConst(), bias.data(), numFrames);
+					MatMul<T, InChannels, OutChannels>::MultiplyInitColwise(input.GetDataConst(), output.GetData(), weights.GetDataConst(), bias.data(), numFrames);
 				}
 				else
 				{
-					MatMul<InSize, OutSize>::MultiplyInitZero(input.GetDataConst(), output.GetData(), weights.GetDataConst(), numFrames);
+					MatMul<T, InChannels, OutChannels>::MultiplyInitZero(input.GetDataConst(), output.GetData(), weights.GetDataConst(), numFrames);
 				}
 			}
 			else
@@ -313,13 +367,13 @@ namespace NeuralAudio
 			}
 		}
 
-		void ProcessAcc(const ChannelRowSpan<float, InSize>& input, const ChannelRowSpan<float, OutSize>& output) const
+		void ProcessAcc(const ChannelRowSpan<T, InChannels>& input, const ChannelRowSpan<T, OutChannels>& output) const
 		{
 			size_t numFrames = output.GetNumCols();
 
-			if constexpr (!DoBias && MatMul<InSize, OutSize>::HasKernel())
+			if constexpr (!DoBias && MatMul<T, InChannels, OutChannels>::HasKernel())
 			{
-				MatMul<InSize, OutSize>::MultiplyAccumlulate(input.GetDataConst(), output.GetData(), weights.GetDataConst(), numFrames);
+				MatMul<T, InChannels, OutChannels>::MultiplyAccumlulate(input.GetDataConst(), output.GetData(), weights.GetDataConst(), numFrames);
 			}
 			else
 			{
@@ -335,31 +389,26 @@ namespace NeuralAudio
 		}
 
 	private:
-		ChannelBuffer<float, OutSize, InSize> weights;
-
-		// Avoid allocation for unused bias
-		using BiasType = typename std::conditional<DoBias,
-			Eigen::Vector<float, OutSize>,
-			Empty>::type;
+		ChannelBuffer<T, OutChannels, InChannels> weights;
 		
 		BiasType bias;
 	};
 
-	template <int ConditionSize, int Channels, int KernelSize, int Dilation, EActivationType Activation>
+	template <typename T, int ConditionSize, int Channels, int KernelSize, int Dilation, EActivationType Activation>
 	class WaveNetLayerT
 	{
 	private:
-		Conv1DT<Channels, Channels, KernelSize, true, Dilation> conv1D;
-		DenseLayerT<ConditionSize, Channels, false> inputMixin;
-		DenseLayerT<Channels, Channels, true> oneByOne;
-		ChannelBuffer<float, Channels, WAVENET_MAX_NUM_FRAMES> state;
+		Conv1DT<T, Channels, Channels, KernelSize, true, Dilation> conv1D;
+		DenseLayerT<T, ConditionSize, Channels, false> inputMixin;
+		DenseLayerT<T, Channels, Channels, true> oneByOne;
 
 	public:
 		static constexpr auto ReceptiveFieldSize = (KernelSize - 1) * Dilation;
+		static constexpr auto KernelSizeP = KernelSize;
+		static constexpr auto DilationP = Dilation;
 
 		WaveNetLayerT()
 		{
-			state.SetZero();
 		}
 
 		void AllocBuffer(int allocNum)
@@ -367,14 +416,36 @@ namespace NeuralAudio
 			conv1D.channelBuffer.AllocBuffer(allocNum);
 		}
 
-		void AdvanceFrames(const size_t numFrames)
-		{
-			conv1D.channelBuffer.AdvanceFrames(numFrames);
-		}
-
 		size_t GetNumWeights()
 		{
 			return conv1D.GetNumWeights() + inputMixin.GetNumWeights() + oneByOne.GetNumWeights();
+		}
+
+		void SetWeights(std::vector<float>::iterator& weights)
+		{
+			conv1D.SetWeights(weights);
+			inputMixin.SetWeights(weights);
+			oneByOne.SetWeights(weights);
+		}
+
+		Conv1DT<T, Channels, Channels, KernelSize, true, Dilation>& GetConv1D()
+		{
+			return conv1D;
+		}
+
+		DenseLayerT<T, ConditionSize, Channels, false>& GetInputMixin()
+		{
+			return inputMixin;
+		}
+
+		DenseLayerT<T, Channels, Channels, true>& GetOneByOne()
+		{
+			return oneByOne;
+		}
+
+		void AdvanceFrames(const size_t numFrames)
+		{
+			conv1D.channelBuffer.AdvanceFrames(numFrames);
 		}
 
 		auto GetInputBuffer(size_t numFrames)
@@ -387,15 +458,11 @@ namespace NeuralAudio
 			conv1D.channelBuffer.CopyBuffer();
 		}
 
-		void SetWeights(std::vector<float>::iterator& weights)
+		template <bool NeedOutput = true>
+		void Process(const ChannelRowSpan<T, ConditionSize>& condition, const ChannelRowSpan<T, Channels>& headInput, const ChannelRowSpan<T, Channels>& output)
 		{
-			conv1D.SetWeights(weights);
-			inputMixin.SetWeights(weights);
-			oneByOne.SetWeights(weights);
-		}
+			ChannelBuffer<T, Channels, WAVENET_MAX_NUM_FRAMES> state;
 
-		void Process(const ChannelRowSpan<float, ConditionSize>& condition, const ChannelRowSpan<float, Channels>& headInput, const ChannelRowSpan<float, Channels>& output)
-		{
 			size_t numFrames = output.GetNumCols();
 
 			auto block = state.Slice(numFrames);
@@ -406,20 +473,23 @@ namespace NeuralAudio
 
 			if constexpr (Activation == EActivationType::Tanh)
 			{
-				WAVENET_MATH::Tanh(block);
+				WAVENET_MATH<T>::template Tanh<Channels>(block);
 			}
 			else if constexpr (Activation == EActivationType::LeakyReLU)
 			{
-				WAVENET_MATH::LeakyReLU(block);
+				WAVENET_MATH<T>::template LeakyReLU<Channels>(block);
 			}
 
 			headInput.GetEigenMap().noalias() += block.GetEigenMapConst();
 
 			//headInput.AddData(block);
 
-			oneByOne.Process(block, output);
+			if constexpr (NeedOutput)
+			{
+				oneByOne.Process(block, output);
 
-			output.GetEigenMap().noalias() += conv1D.GetInputBuffer(numFrames).GetEigenMapConst();
+				output.GetEigenMap().noalias() += conv1D.GetInputBuffer(numFrames).GetEigenMapConst();
+			}
 
 			//output.AddData(conv1D.GetInputBuffer(numFrames));
 		}
@@ -431,7 +501,7 @@ namespace NeuralAudio
 	template <int... values>
 		using KernelSizes = std::integer_sequence<int, values...>;
 
-	template <int InputSize, int ConditionSize, int HeadSize, int HeadKernelSize, int HeadDilation, int Channels, typename KernelSizeSequence, typename DilationsSequence, bool HasHeadBias, EActivationType Activation>
+	template <typename T, int InputSize, int ConditionSize, int HeadSize, int HeadKernelSize, int HeadDilation, int Channels, typename KernelSizeSequence, typename DilationsSequence, bool HasHeadBias, EActivationType Activation>
 	class WaveNetLayerArrayT
 	{
 		template <typename, typename>
@@ -442,30 +512,29 @@ namespace NeuralAudio
 		template <int... dilationVals, int... kernelSizeVals>
 		struct LayersHelper<KernelSizes<kernelSizeVals...>, Dilations<dilationVals...>>
 		{
-			using type = std::tuple<WaveNetLayerT<ConditionSize, Channels, kernelSizeVals, dilationVals, Activation>...>;
+			using type = std::tuple<WaveNetLayerT<T, ConditionSize, Channels, kernelSizeVals, dilationVals, Activation>...>;
 		};
 
 		using Layers = typename LayersHelper<KernelSizeSequence, DilationsSequence>::type;
 
 	private:
 		Layers layers;
-		DenseLayerT<InputSize, Channels, false> rechannel;
-		Conv1DT<Channels, HeadSize, HeadKernelSize, HasHeadBias, HeadDilation> headRechannel;
-
-		static constexpr auto numLayers = std::tuple_size_v<decltype (layers)>;
-		static constexpr auto lastLayer = numLayers - 1;
+		DenseLayerT<T, InputSize, Channels, false> rechannel;
+		Conv1DT<T, Channels, HeadSize, HeadKernelSize, HasHeadBias, HeadDilation> headRechannel;
 
 	public:
 		static constexpr auto NumChannelsP = Channels;
 		static constexpr auto HeadSizeP = HeadSize;
+		static constexpr auto NumLayers = std::tuple_size_v<decltype (layers)>;
+		static constexpr auto LastLayer = NumLayers - 1;
 
-		ChannelBuffer<float, Channels, WAVENET_MAX_NUM_FRAMES> arrayOutputs;
-		ChannelBuffer<float, HeadSize, WAVENET_MAX_NUM_FRAMES> headOutputs;
+		ChannelBuffer<T, Channels, WAVENET_MAX_NUM_FRAMES> arrayOutputs;
+		ChannelBuffer<T, HeadSize, WAVENET_MAX_NUM_FRAMES> headOutputs;
 		int ReceptiveFieldSize = 0;	// This should be a static constexpr, but I haven't sorted out the right template magic
 
 		WaveNetLayerArrayT()
 		{
-			ForEachIndex<numLayers>([&](auto layerIndex)
+			ForEachIndex<NumLayers>([&](auto layerIndex)
 				{
 					ReceptiveFieldSize += std::get<layerIndex>(layers).ReceptiveFieldSize;
 				});
@@ -475,7 +544,7 @@ namespace NeuralAudio
 
 		int AllocBuffers(int allocNum)
 		{
-			ForEachIndex<numLayers>([&](auto layerIndex)
+			ForEachIndex<NumLayers>([&](auto layerIndex)
 				{
 					std::get<layerIndex>(layers).AllocBuffer(allocNum++);
 				});
@@ -489,7 +558,7 @@ namespace NeuralAudio
 		{
 			size_t numWeights = rechannel.GetNumWeights();
 
-			ForEachIndex<numLayers>([&](auto layerIndex)
+			ForEachIndex<NumLayers>([&](auto layerIndex)
 				{
 					numWeights += std::get<layerIndex>(layers).GetNumWeights();
 				});
@@ -503,7 +572,7 @@ namespace NeuralAudio
 		{
 			rechannel.SetWeights(weights);
 
-			ForEachIndex<numLayers>([&](auto layerIndex)
+			ForEachIndex<NumLayers>([&](auto layerIndex)
 				{
 					std::get<layerIndex>(layers).SetWeights(weights);
 				});
@@ -511,15 +580,30 @@ namespace NeuralAudio
 			headRechannel.SetWeights(weights);
 		}
 
-		void Prewarm(const ChannelRowSpan<float, InputSize>& layerInputs, const ChannelRowSpan<float, ConditionSize>& condition, const ChannelRowSpan<float, Channels>& headInputs)
+		Layers& GetLayers()
+		{
+			return layers;
+		}
+
+		DenseLayerT<T, InputSize, Channels, false>& GetRechannel()
+		{
+			return rechannel;
+		}
+
+		Conv1DT<T, Channels, HeadSize, HeadKernelSize, HasHeadBias, HeadDilation>& GetHeadRechannel()
+		{
+			return headRechannel;
+		}
+
+		void Prewarm(const ChannelRowSpan<T, InputSize>& layerInputs, const ChannelRowSpan<T, ConditionSize>& condition, const ChannelRowSpan<T, Channels>& headInputs)
 		{
 			rechannel.Process(layerInputs, std::get<0>(layers).GetInputBuffer(1));
 
-			ForEachIndex<numLayers>([&](auto layerIndex)
+			ForEachIndex<NumLayers>([&](auto layerIndex)
 				{
 					std::get<layerIndex>(layers).CopyBuffer();
 
-					if constexpr (layerIndex == lastLayer)
+					if constexpr (layerIndex == LastLayer)
 					{
 						std::get<layerIndex>(layers).Process(condition, headInputs, arrayOutputs.Slice(1));
 					}
@@ -536,17 +620,18 @@ namespace NeuralAudio
 			headRechannel.Process(headOutputs.Slice(1));
 		}
 
-		void Process(const ChannelRowSpan<float, InputSize>& layerInputs, const ChannelRowSpan<float, ConditionSize>& condition, const ChannelRowSpan<float, Channels>& headInputs)
+		template <bool NeedOutput = true>
+		void Process(const ChannelRowSpan<T, InputSize>& layerInputs, const ChannelRowSpan<T, ConditionSize>& condition, const ChannelRowSpan<T, Channels>& headInputs)
 		{
 			size_t numFrames = condition.GetNumCols();
 
 			rechannel.Process(layerInputs, std::get<0>(layers).GetInputBuffer(numFrames));
 
-			ForEachIndex<numLayers>([&](auto layerIndex)
+			ForEachIndex<NumLayers>([&](auto layerIndex)
 				{
-					if constexpr (layerIndex == lastLayer)
+					if constexpr (layerIndex == LastLayer)
 					{
-						std::get<layerIndex>(layers).Process(condition, headInputs, arrayOutputs.Slice(numFrames));
+						std::get<layerIndex>(layers).template Process<NeedOutput>(condition, headInputs, arrayOutputs.Slice(numFrames));
 					}
 					else
 					{
@@ -567,11 +652,15 @@ namespace NeuralAudio
 		}
 	};
 
-	template <typename... LayerArrays>
+	template <typename T, typename... LayerArrays>
 	class WaveNetModelT
 	{
 	public:
 		int ReceptiveFieldSize = 0;	// This should be a static constexpr, but I haven't sorted out the right template magic
+
+		static constexpr auto headLayerChannels = std::tuple_element_t<0, std::tuple<LayerArrays...>>::NumChannelsP;
+		static constexpr auto NumLayerArrays = std::tuple_size_v<std::tuple<LayerArrays...>>;
+		static constexpr auto LastLayerArray = NumLayerArrays - 1;
 
 		WaveNetModelT()
 		{
@@ -625,32 +714,43 @@ namespace NeuralAudio
 			return WAVENET_MAX_NUM_FRAMES;
 		}
 
+		auto& GetLayerArrays()
+		{
+			return layerArrays;
+		}
+
+		T GetHeadScale()
+		{
+			return headScale;
+		}
+
 		void Prewarm()
 		{
+			ChannelBuffer<T, 1, 1> condition;
 			condition.GetData()[0] = 0;
 
+			ChannelBuffer<T, headLayerChannels, 1> headArray;
 			headArray.SetZero();
-
-			auto conditionSpan = condition.Slice(1);
-			auto headArraySpan = headArray.Slice(1);
 
 			ForEachIndex<sizeof...(LayerArrays)>([&](auto layerIndex)
 				{
 					if constexpr (layerIndex == 0)
 					{
-						std::get<layerIndex>(layerArrays).Prewarm(conditionSpan, conditionSpan, headArraySpan);
+						std::get<layerIndex>(layerArrays).Prewarm(condition, condition, headArray);
 					}
 					else
 					{
-						std::get<layerIndex>(layerArrays).Prewarm(std::get<layerIndex - 1>(layerArrays).arrayOutputs.Slice(1), conditionSpan, std::get<layerIndex - 1>(layerArrays).headOutputs.Slice(1));
+						std::get<layerIndex>(layerArrays).Prewarm(std::get<layerIndex - 1>(layerArrays).arrayOutputs.Slice(1), condition, std::get<layerIndex - 1>(layerArrays).headOutputs.Slice(1));
 					}
 				});
 		}
 
-		void Process(const float* input, float* output, const size_t numFrames)
+		void Process(const T* input, T* output, const size_t numFrames)
 		{
-			std::memcpy(condition.GetData(), input, numFrames * sizeof(float));
+			ChannelBuffer<T, 1, WAVENET_MAX_NUM_FRAMES> condition;
+			std::memcpy(condition.GetData(), input, numFrames * sizeof(T));
 
+			ChannelBuffer<T, headLayerChannels, WAVENET_MAX_NUM_FRAMES> headArray;
 			headArray.SetZero();
 
 			auto conditionSpan = condition.Slice(numFrames);
@@ -662,13 +762,17 @@ namespace NeuralAudio
 					{
 						std::get<layerIndex>(layerArrays).Process(conditionSpan, conditionSpan, headArraySpan);
 					}
+					else if constexpr (layerIndex == LastLayerArray)
+					{
+						std::get<layerIndex>(layerArrays).template Process<false>(std::get<layerIndex - 1>(layerArrays).arrayOutputs.Slice(numFrames), conditionSpan, std::get<layerIndex - 1>(layerArrays).headOutputs.Slice(numFrames));
+					}
 					else
 					{
 						std::get<layerIndex>(layerArrays).Process(std::get<layerIndex - 1>(layerArrays).arrayOutputs.Slice(numFrames), conditionSpan, std::get<layerIndex - 1>(layerArrays).headOutputs.Slice(numFrames));
 					}
 				});
 
-			const float* finalHeadArray = std::get<sizeof...(LayerArrays) - 1>(layerArrays).headOutputs.GetData();
+			T* finalHeadArray = std::get<sizeof...(LayerArrays) - 1>(layerArrays).headOutputs.GetData();
 
 			for (size_t i = 0; i < numFrames; i++)
 			{
@@ -677,11 +781,7 @@ namespace NeuralAudio
 		}
 
 	private:
-		static constexpr auto headLayerChannels = std::tuple_element_t<0, std::tuple<LayerArrays...>>::NumChannelsP;
-
 		std::tuple<LayerArrays...> layerArrays;
-		ChannelBuffer<float, 1, WAVENET_MAX_NUM_FRAMES> condition;
-		ChannelBuffer<float, headLayerChannels, WAVENET_MAX_NUM_FRAMES> headArray;
-		float headScale;
+		T headScale;
 	};
 }

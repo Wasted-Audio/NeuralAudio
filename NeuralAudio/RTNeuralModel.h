@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef BUILD_RTNEURAL
+
 #include <type_traits>
 #include <Eigen/Core>
 #include <Eigen/Dense>
@@ -223,7 +225,7 @@ namespace NeuralAudio
 			return true;
 		}
 
-		void Process(float* input, float* output, size_t numSamples) override
+		void Process(const float* input, float* output, size_t numSamples) override
 		{
 			for (size_t i = 0; i < numSamples; i++)
 				output[i] = model->forward(input + i);
@@ -428,7 +430,7 @@ namespace NeuralAudio
 			return true;
 		}
 
-		void Process(float* input, float* output, size_t numSamples) override
+		void Process(const float* input, float* output, size_t numSamples) override
 		{
 			for (size_t i = 0; i < numSamples; i++)
 				output[i] = model->forward(input + i);
@@ -446,3 +448,4 @@ namespace NeuralAudio
 		std::unique_ptr<RTNeural::Model<float>> model;
 	};
 }
+#endif

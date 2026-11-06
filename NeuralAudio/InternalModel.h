@@ -101,7 +101,7 @@ namespace NeuralAudio
 			return model->ReceptiveFieldSize;
 		}
 
-		void Process(float* input, float* output, size_t numSamples) override
+		void Process(const float* input, float* output, size_t numSamples) override
 		{
 			size_t offset = 0;
 
@@ -150,12 +150,12 @@ namespace NeuralAudio
 	{
 	public:
 		using ModelType = typename std::conditional<NumChannels == 16,
-			NeuralAudio::WaveNetModelT<
-				NeuralAudio::WaveNetLayerArrayT<1, 1, HeadSize, 1, 1, NumChannels, IStdKernelSizes, IStdDilations, false, EActivationType::Tanh>,
-				NeuralAudio::WaveNetLayerArrayT<NumChannels, 1, 1, 1, 1, HeadSize, IStdKernelSizes, IStdDilations, true, EActivationType::Tanh>>,
-			NeuralAudio::WaveNetModelT<
-				NeuralAudio::WaveNetLayerArrayT<1, 1, HeadSize, 1, 1, NumChannels, ILiteKernelSizes1, ILiteDilations1, false, EActivationType::Tanh>,
-				NeuralAudio::WaveNetLayerArrayT<NumChannels, 1, 1, 1, 1, HeadSize, ILiteKernelSizes2, ILiteDilations2, true, EActivationType::Tanh>>
+			NeuralAudio::WaveNetModelT<float,
+				NeuralAudio::WaveNetLayerArrayT<float, 1, 1, HeadSize, 1, 1, NumChannels, IStdKernelSizes, IStdDilations, false, EActivationType::Tanh>,
+				NeuralAudio::WaveNetLayerArrayT<float, NumChannels, 1, 1, 1, 1, HeadSize, IStdKernelSizes, IStdDilations, true, EActivationType::Tanh>>,
+			NeuralAudio::WaveNetModelT<float,
+				NeuralAudio::WaveNetLayerArrayT<float, 1, 1, HeadSize, 1, 1, NumChannels, ILiteKernelSizes1, ILiteDilations1, false, EActivationType::Tanh>,
+				NeuralAudio::WaveNetLayerArrayT<float, NumChannels, 1, 1, 1, 1, HeadSize, ILiteKernelSizes2, ILiteDilations2, true, EActivationType::Tanh>>
 			>::type;
 
 		InternalModel* CreateModel() override
@@ -223,7 +223,7 @@ namespace NeuralAudio
 			model->SetMaxFrames(maxSize);
 		}
 
-		void Process(float* input, float* output, size_t numSamples) override
+		void Process(const float* input, float* output, size_t numSamples) override
 		{
 			size_t offset = 0;
 
@@ -360,7 +360,7 @@ namespace NeuralAudio
 			(void)maxSize;
 		}
 
-		void Process(float* input, float* output, size_t numSamples) override
+		void Process(const float* input, float* output, size_t numSamples) override
 		{
 			model->Process(input, output, numSamples);
 		}
@@ -523,7 +523,7 @@ namespace NeuralAudio
 			(void)maxSize;
 		}
 
-		void Process(float* input, float* output, size_t numSamples) override
+		void Process(const float* input, float* output, size_t numSamples) override
 		{
 			model->Process(input, output, numSamples);
 		}

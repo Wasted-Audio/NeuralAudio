@@ -231,25 +231,17 @@ The "ModelTest" application binaries provided in the [Releases section](https://
 
 ## CMake Options
 
-```-DBUILD_NAMCORE=ON|OFF```: Support loading models using the NAM Core implemenations.
-
-```-DNAM_USE_INLINE_GEMM=ON|OFF```: Enable use of inline matrix multiplication in NAM Core.
-
-```-DNAM_ENABLE_A2_FAST=ON|OFF```: Enable use of A2 fast path wavenet in NAM Core.
-
-```-DBUILD_STATIC_RTNEURAL=ON|OFF```: Build static RTNeural model architectures (slower compile, larger size - only use if you plan on forcing RTNeural model loading).
-
 ```-DBUILD_INTERNAL_STATIC_WAVENET=ON|OFF```: Build internal static WaveNet model architectures (faster internal WaveNet, but slower compile, larger size).
 
 ```-DBUILD_INTERNAL_STATIC_LSTM=ON|OFF```: Build internal static LSTM model architectures (faster internal LSTM, but slower compile, larger size).
 
 ```-DBUILD_STATIC_INTERNAL_NAMA2=ON|OFF```: Build internal static A2 implementation.
 
-```-DMULTIFRAME_8X8_CONVOLUTION="0"|"4"||"8"```: Use optimized multiframe 8x8 convolution. Much faster on very modern compilers. Much slower on older compilers. Be sure to use quotes around value. Defaults to "0" (disabled).
+```-DMULTIFRAME_8X8_CONVOLUTION=0|4|8```: Use optimized multiframe 8x8 convolution. Much faster on very modern compilers. Much slower on older compilers. Defaults to "0" (disabled).
 
 ```-DDEFAULT_QUALITY_SCALE="X.X"```: Default model quality scale factor (0.0 to 1.0). Be sure to use quotes around value. Defaults to "1.0".
 
-```-DDEFAULT_INPUT_DBU="XX"```: Default dBu level for model input calibration.
+```-DDEFAULT_INPUT_DBU="XX"```: Default dBu level for model input calibration. Be sure to use quotes around floating point values. Defaults to "12.0".
 
 ```-DWAVENET_FRAMES=XXX```: Sample buffer size for the internal WaveNet implementation. Defaults to **64**. If you know you are going to be using a fixed sample buffer smaller or larger than this, use that instead. Note that the model will still be able to process any buffer size - it is just optimized for this size.
 
@@ -263,6 +255,19 @@ The "ModelTest" application binaries provided in the [Releases section](https://
   - ```StdMath```: Use standard math functions. No approxmation used - much slower.
 
 ```-DBUILD_UTILS=ON|OFF```: Build performance/accuracy testing tools (located in the "Utils" folder).
+
+```-DBUILD_NAMCORE=ON|OFF```: Support loading models using the NAM Core implemenations.
+
+```-DNAM_USE_INLINE_GEMM=ON|OFF```: Enable use of inline matrix multiplication in NAM Core.
+
+```-DNAM_ENABLE_A2_FAST=ON|OFF```: Enable use of A2 fast path wavenet in NAM Core.
+
+```-DNAM_A2_RING_MODE=0|1```: Ring-buffer strategy for A2 FAST. Defaults to "1"
+
+  - ```0```: linear memmove-rewind (variable worst-case latency, sporadic spikes)
+  - ```1```(the default): pow2 + tail mirror (constant per-block work, branchless reads)
+
+```-DBUILD_STATIC_RTNEURAL=ON|OFF```: Build static RTNeural model architectures (slower compile, larger size - only use if you plan on forcing RTNeural model loading).
 
 # Software/Hardware Using NeuralAudio
 
